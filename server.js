@@ -1,85 +1,76 @@
 import express from "express";
 import cors from "cors";
-import puppeteer from "puppeteer";
+import puppeteer, { executablePath } from "puppeteer";
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use(cors());
 
-// Health check route
-app.get("/", (req, res) => {
-  res.send("✅ NHS Pay API (Render + Puppeteer) is live! Try /api/payscale");
-});
-
 app.get("/api/payscale", async (req, res) => {
-  let browser;
+  const url = "https://www.nhsbands.co.uk/";
+
   try {
-    // Launch Puppeteer
-    browser = await puppeteer.launch({
+    const browser = await puppeteer.launch({
       headless: true,
+      executablePath: executablePath(), // ✅ finds installed Chrome
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-      ],
+        "--disable-dev-shm-usage"
+      ]
     });
+
     const page = await browser.newPage();
-    await page.goto("https://www.nhsbands.co.uk/", {
-      waitUntil: "networkidle2",
-      timeout: 60000,
-    });
+    await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    // Wait for table rows
-    await page.waitForSelector(".band-wrapper table tbody tr");
-
-    // Scrape all rows
-    const bands = await page.$$eval(".band-wrapper table tbody tr", (rows) => {
-      return rows.map((row) => {
-        const cols = Array.from(row.querySelectorAll("td")).map((td) =>
-          td.textContent.trim()
-        );
-        if (cols.length >= 3) {
-          return {
-            Band: cols[0],
-            "Bottom of band": parseInt(cols[1].replace(/,/g, ""), 10) || null,
-            "Top of band": parseInt(cols[2].replace(/,/g, ""), 10) || null,
-          };
+    const data = await page.evaluate(() => {
+      const bands = [];
+      const rows = document.querySelectorAll("table tbody tr");
+      rows.forEach((row) => {
+        const cells = row.querySelectorAll("td");
+        if (cells.length >= 2) {
+          const band = cells[0].innerText.trim();
+          const topOfBand = parseInt(cells[cells.length - 1].innerText.replace(/[^0-9]/g, ""), 10);
+          bands.push({ Band: band, "Top of band": topOfBand });
         }
-        return null;
-      }).filter(Boolean);
-    });
+      });
 
-    // Fix band naming: 8a–8d
-    const correctedBands = [];
-    let band8Count = 0;
-    for (const band of bands) {
-      if (band.Band.startsWith("Band 8")) {
-        const suffixes = ["a", "b", "c", "d"];
-        if (band8Count < 4) {
-          correctedBands.push({
-            ...band,
-            Band: `Band 8${suffixes[band8Count]}`,
-          });
-        }
-        band8Count++;
-      } else if (!band.Band.startsWith("Band 8")) {
-        correctedBands.push(band);
+      // Compute Bottom of Band by shifting previous top value
+      for (let i = 0; i < bands.length; i++) {
+        bands[i]["Bottom of band"] = i === 0 ? 1 : bands[i - 1]["Top of band"] + 1;
       }
-    }
+
+      // Fix NHS naming for higher bands
+      const names = [
+        "Band 1", "Band 2", "Band 3", "Band 4", "Band 5",
+        "Band 6", "Band 7", "Band 8a", "Band 8b", "Band 8c",
+        "Band 8d", "Band 9"
+      ];
+      bands.forEach((b, i) => {
+        if (names[i]) b.Band = names[i];
+      });
+
+      return bands;
+    });
+
+    await browser.close();
 
     res.json({
       status: "success",
-      source: "https://www.nhsbands.co.uk/",
-      bands: correctedBands,
+      source: url,
+      bands: data
     });
-  } catch (err) {
-    console.error("❌ Scraping failed:", err);
-    res.status(500).json({ status: "error", message: err.message });
-  } finally {
-    if (browser) await browser.close();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ status: "error", message: error.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`✅ Server running on port ${PORT}`)
-);
+app.get("/", (req, res) => {
+  res.send("✅ NHS Pay API is running!");
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ Server running at http://localhost:${PORT}`);
+});
