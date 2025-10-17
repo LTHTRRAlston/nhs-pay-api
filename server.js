@@ -1,19 +1,51 @@
 import express from "express";
 import cors from "cors";
-import puppeteer, { executablePath } from "puppeteer";
+import puppeteer from "puppeteer-core";
+import { install, computeExecutablePath } from "@puppeteer/browsers";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
+async function getChromePath() {
+  // Chrome cache location for Render
+  const cacheDir = "/opt/render/.cache/puppeteer";
+  const executablePath = computeExecutablePath({
+    browser: "chrome",
+    buildId: "141.0.7390.78",
+    cacheDir
+  });
+
+  try {
+    // Check if Chrome exists
+    const fs = await import("fs");
+    if (!fs.existsSync(executablePath)) {
+      console.log("⚙️ Chrome not found — installing...");
+      await install({
+        browser: "chrome",
+        buildId: "141.0.7390.78",
+        cacheDir
+      });
+    } else {
+      console.log("✅ Chrome found:", executablePath);
+    }
+  } catch (err) {
+    console.error("❌ Error checking/installing Chrome:", err);
+  }
+
+  return executablePath;
+}
+
 app.get("/api/payscale", async (req, res) => {
   const url = "https://www.nhsbands.co.uk/";
 
   try {
+    const chromePath = await getChromePath();
+
     const browser = await puppeteer.launch({
       headless: true,
-      executablePath: executablePath(), // ✅ finds installed Chrome
+      executablePath: chromePath,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -36,12 +68,12 @@ app.get("/api/payscale", async (req, res) => {
         }
       });
 
-      // Compute Bottom of Band by shifting previous top value
+      // Compute Bottom of Band
       for (let i = 0; i < bands.length; i++) {
         bands[i]["Bottom of band"] = i === 0 ? 1 : bands[i - 1]["Top of band"] + 1;
       }
 
-      // Fix NHS naming for higher bands
+      // Fix NHS band names
       const names = [
         "Band 1", "Band 2", "Band 3", "Band 4", "Band 5",
         "Band 6", "Band 7", "Band 8a", "Band 8b", "Band 8c",
@@ -68,9 +100,9 @@ app.get("/api/payscale", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("✅ NHS Pay API is running!");
+  res.send("✅ NHS Pay API running on Render!");
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Server running at http://localhost:${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
