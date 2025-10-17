@@ -1,108 +1,69 @@
-import express from "express";
-import cors from "cors";
-import puppeteer from "puppeteer-core";
-import { install, computeExecutablePath } from "@puppeteer/browsers";
+import express from 'express';
+import puppeteer from 'puppeteer'; // not puppeteer-core
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+app.get('/api/payscale', async (req, res) => {
+  const url = 'https://www.nhsbands.co.uk/';
 
-async function getChromePath() {
-  // Chrome cache location for Render
-  const cacheDir = "/opt/render/.cache/puppeteer";
-  const executablePath = computeExecutablePath({
-    browser: "chrome",
-    buildId: "141.0.7390.78",
-    cacheDir
-  });
-
+  let browser;
   try {
-    // Check if Chrome exists
-    const fs = await import("fs");
-    if (!fs.existsSync(executablePath)) {
-      console.log("⚙️ Chrome not found — installing...");
-      await install({
-        browser: "chrome",
-        buildId: "141.0.7390.78",
-        cacheDir
-      });
-    } else {
-      console.log("✅ Chrome found:", executablePath);
-    }
-  } catch (err) {
-    console.error("❌ Error checking/installing Chrome:", err);
-  }
-
-  return executablePath;
-}
-
-app.get("/api/payscale", async (req, res) => {
-  const url = "https://www.nhsbands.co.uk/";
-
-  try {
-    const chromePath = await getChromePath();
-
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: true,
-      executablePath: chromePath,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage"
-      ]
+      args: ['--no-sandbox', '--disable-setuid-sandbox'], // required on Render
     });
 
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.goto(url, { waitUntil: 'networkidle0' });
 
-    const data = await page.evaluate(() => {
-      const bands = [];
-      const rows = document.querySelectorAll("table tbody tr");
-      rows.forEach((row) => {
-        const cells = row.querySelectorAll("td");
-        if (cells.length >= 2) {
-          const band = cells[0].innerText.trim();
-          const topOfBand = parseInt(cells[cells.length - 1].innerText.replace(/[^0-9]/g, ""), 10);
-          bands.push({ Band: band, "Top of band": topOfBand });
-        }
-      });
+    await page.waitForSelector('table', { timeout: 20000 });
 
-      // Compute Bottom of Band
-      for (let i = 0; i < bands.length; i++) {
-        bands[i]["Bottom of band"] = i === 0 ? 1 : bands[i - 1]["Top of band"] + 1;
-      }
+    const bands = await page.evaluate(() => {
+      const result = [];
+      const tables = document.querySelectorAll('table');
 
-      // Fix NHS band names
-      const names = [
-        "Band 1", "Band 2", "Band 3", "Band 4", "Band 5",
-        "Band 6", "Band 7", "Band 8a", "Band 8b", "Band 8c",
-        "Band 8d", "Band 9"
+      let previousTop = 0;
+      const nhsBandNames = [
+        'Band 1','Band 2','Band 3','Band 4','Band 5','Band 6','Band 7',
+        'Band 8a','Band 8b','Band 8c','Band 8d','Band 9'
       ];
-      bands.forEach((b, i) => {
-        if (names[i]) b.Band = names[i];
+
+      tables.forEach((table, index) => {
+        let top = 0;
+        table.querySelectorAll('tbody tr td').forEach(td => {
+          const n = Number(td.innerText.replace(/[£,<,+]/g, '').trim());
+          if (!isNaN(n) && n > top) top = n;
+        });
+
+        const bottom = previousTop + 1;
+        previousTop = top;
+
+        result.push({
+          Band: nhsBandNames[index] || `Band ${index + 1}`,
+          'Bottom of band': bottom,
+          'Top of band': top
+        });
       });
 
-      return bands;
+      return result;
     });
 
     await browser.close();
 
     res.json({
-      status: "success",
+      status: 'success',
       source: url,
-      bands: data
+      bands
     });
+
   } catch (error) {
+    if (browser) await browser.close();
     console.error(error);
-    res.status(500).json({ status: "error", message: error.message });
+    res.status(500).json({ status: 'error', message: error.message });
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("✅ NHS Pay API running on Render!");
-});
-
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ NHS Pay API running at http://localhost:${PORT}`);
 });
