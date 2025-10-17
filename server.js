@@ -1,94 +1,67 @@
 import express from "express";
 import cors from "cors";
-import puppeteer from "puppeteer";
+import fetch from "node-fetch";
+import * as cheerio from "cheerio";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
 
-// In-memory cache
-let cachedBands = null;
-let lastScrape = 0;
-const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+// ✅ Root route for Render / health check
+app.get("/", (req, res) => {
+  res.send("✅ NHS Pay API is running. Try /api/payscale");
+});
 
+// Main API route
 app.get("/api/payscale", async (req, res) => {
   try {
-    const now = Date.now();
-    if (cachedBands && now - lastScrape < CACHE_TTL) {
-      return res.json({
-        status: "success",
-        source: "https://www.nhsbands.co.uk/",
-        bands: cachedBands,
-        cached: true,
+    const response = await fetch("https://www.nhsbands.co.uk/");
+    const body = await response.text();
+
+    const $ = cheerio.load(body);
+    const rows = $("table tbody tr");
+
+    const bands = [];
+    let previousTop = 0;
+
+    rows.each((index, row) => {
+      const cols = $(row).find("td");
+      const bandName = $(cols[0]).text().trim();
+      const bottomOfBand = parseInt($(cols[1]).text().replace(/,/g, ""), 10);
+      const topOfBand = parseInt($(cols[2]).text().replace(/,/g, ""), 10);
+
+      bands.push({
+        Band: bandName,
+        "Bottom of band": bottomOfBand,
+        "Top of band": topOfBand,
       });
+
+      previousTop = topOfBand;
+    });
+
+    // Fix NHS band naming 8a–8d
+    const correctedBands = [];
+    for (let i = 0; i < bands.length; i++) {
+      if (bands[i].Band === "Band 8") {
+        correctedBands.push({ Band: "Band 8a", ...bands[i] });
+        correctedBands.push({ Band: "Band 8b", ...bands[i + 1] });
+        correctedBands.push({ Band: "Band 8c", ...bands[i + 2] });
+        correctedBands.push({ Band: "Band 8d", ...bands[i + 3] });
+        i += 3;
+      } else if (!bands[i].Band.startsWith("Band 8")) {
+        correctedBands.push(bands[i]);
+      }
     }
-
-    const url = "https://www.nhsbands.co.uk/";
-
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded" });
-
-    const bands = await page.evaluate(() => {
-      const bandEls = Array.from(document.querySelectorAll(".band-wrapper"));
-      const result = [];
-
-      // Extract top-of-band numbers from the page
-      const topNumbers = Array.from(
-        document.querySelectorAll(".band-wrapper .band-row .salary")
-      ).map((el) => parseInt(el.innerText.replace(/[^0-9]/g, ""), 10));
-
-      // Map band names correctly: 1-7, 8a-8d, 9
-      const bandNames = [
-        "Band 1",
-        "Band 2",
-        "Band 3",
-        "Band 4",
-        "Band 5",
-        "Band 6",
-        "Band 7",
-        "Band 8a",
-        "Band 8b",
-        "Band 8c",
-        "Band 8d",
-        "Band 9",
-      ];
-
-      let bottom = 1;
-      topNumbers.forEach((top, i) => {
-        result.push({
-          Band: bandNames[i] || `Band ${i + 1}`,
-          "Bottom of band": bottom,
-          "Top of band": top,
-        });
-        bottom = top + 1;
-      });
-
-      return result;
-    });
-
-    await browser.close();
-
-    // Cache result
-    cachedBands = bands;
-    lastScrape = Date.now();
 
     res.json({
       status: "success",
-      source: url,
-      bands,
-      cached: false,
+      source: "https://www.nhsbands.co.uk/",
+      bands: correctedBands,
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ status: "error", message: err.message });
+  } catch (error) {
+    console.error("Error fetching NHS band data:", error);
+    res.status(500).json({ status: "error", message: "Failed to fetch pay scale data" });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ NHS Pay API running at http://localhost:${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
