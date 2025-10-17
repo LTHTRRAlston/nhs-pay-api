@@ -1,54 +1,68 @@
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
-import * as cheerio from "cheerio";
+import puppeteer from "puppeteer";
 
 const app = express();
 app.use(cors());
 
-// ✅ Root route for Render / health check
+// Health check route
 app.get("/", (req, res) => {
-  res.send("✅ NHS Pay API is running. Try /api/payscale");
+  res.send("✅ NHS Pay API (Render + Puppeteer) is live! Try /api/payscale");
 });
 
-// Main API route
 app.get("/api/payscale", async (req, res) => {
+  let browser;
   try {
-    const response = await fetch("https://www.nhsbands.co.uk/");
-    const body = await response.text();
-
-    const $ = cheerio.load(body);
-    const rows = $("table tbody tr");
-
-    const bands = [];
-    let previousTop = 0;
-
-    rows.each((index, row) => {
-      const cols = $(row).find("td");
-      const bandName = $(cols[0]).text().trim();
-      const bottomOfBand = parseInt($(cols[1]).text().replace(/,/g, ""), 10);
-      const topOfBand = parseInt($(cols[2]).text().replace(/,/g, ""), 10);
-
-      bands.push({
-        Band: bandName,
-        "Bottom of band": bottomOfBand,
-        "Top of band": topOfBand,
-      });
-
-      previousTop = topOfBand;
+    // Launch Puppeteer
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+      ],
+    });
+    const page = await browser.newPage();
+    await page.goto("https://www.nhsbands.co.uk/", {
+      waitUntil: "networkidle2",
+      timeout: 60000,
     });
 
-    // Fix NHS band naming 8a–8d
+    // Wait for table rows
+    await page.waitForSelector(".band-wrapper table tbody tr");
+
+    // Scrape all rows
+    const bands = await page.$$eval(".band-wrapper table tbody tr", (rows) => {
+      return rows.map((row) => {
+        const cols = Array.from(row.querySelectorAll("td")).map((td) =>
+          td.textContent.trim()
+        );
+        if (cols.length >= 3) {
+          return {
+            Band: cols[0],
+            "Bottom of band": parseInt(cols[1].replace(/,/g, ""), 10) || null,
+            "Top of band": parseInt(cols[2].replace(/,/g, ""), 10) || null,
+          };
+        }
+        return null;
+      }).filter(Boolean);
+    });
+
+    // Fix band naming: 8a–8d
     const correctedBands = [];
-    for (let i = 0; i < bands.length; i++) {
-      if (bands[i].Band === "Band 8") {
-        correctedBands.push({ Band: "Band 8a", ...bands[i] });
-        correctedBands.push({ Band: "Band 8b", ...bands[i + 1] });
-        correctedBands.push({ Band: "Band 8c", ...bands[i + 2] });
-        correctedBands.push({ Band: "Band 8d", ...bands[i + 3] });
-        i += 3;
-      } else if (!bands[i].Band.startsWith("Band 8")) {
-        correctedBands.push(bands[i]);
+    let band8Count = 0;
+    for (const band of bands) {
+      if (band.Band.startsWith("Band 8")) {
+        const suffixes = ["a", "b", "c", "d"];
+        if (band8Count < 4) {
+          correctedBands.push({
+            ...band,
+            Band: `Band 8${suffixes[band8Count]}`,
+          });
+        }
+        band8Count++;
+      } else if (!band.Band.startsWith("Band 8")) {
+        correctedBands.push(band);
       }
     }
 
@@ -57,11 +71,15 @@ app.get("/api/payscale", async (req, res) => {
       source: "https://www.nhsbands.co.uk/",
       bands: correctedBands,
     });
-  } catch (error) {
-    console.error("Error fetching NHS band data:", error);
-    res.status(500).json({ status: "error", message: "Failed to fetch pay scale data" });
+  } catch (err) {
+    console.error("❌ Scraping failed:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  } finally {
+    if (browser) await browser.close();
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`✅ Server running on port ${PORT}`)
+);
